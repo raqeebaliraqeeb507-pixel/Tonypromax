@@ -28,6 +28,8 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
 
     override fun onCreate() {
         super.onCreate()
+        if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("TonyChannel", "Tony", NotificationManager.IMPORTANCE_LOW))
+        startForeground(1, NotificationCompat.Builder(this, "TonyChannel").setContentTitle("Tony Pro Max").setContentText("تیار ہو رہا ہے...").setSmallIcon(android.R.drawable.ic_btn_speak_now).build())
         tts = TextToSpeech(this, this)
         initEngine()
     }
