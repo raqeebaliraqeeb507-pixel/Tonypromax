@@ -137,23 +137,44 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
     }
 
     private fun askGeminiBrain(userText: String, apiKey: String) {
-        try {
-            updateStatus("🧠 سوچ رہا ہوں...")
-            val base = decodeB64("aHR0cHM6Ly9nZW5lcmF0aXZlbGFuZ3VhZ2UuZ29vZ2xlYXBpcy5jb20vdjFiZXRhL21vZGVscy9nZW1pbmktMS41LWZsYXNoOmdlbmVyYXRlQ29udGVudD9rZXk9")
-            val conn = URL(base + apiKey).openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.doOutput = true
-            val prompt = "You are Tony Pro Max, a smart Urdu voice assistant created by Doctor Raqeeb Ali 117 Siksar Wala (ڈاکٹر رقیب علی 117 سکسار والا). User said: '$userText'. Reply ONLY in valid JSON: {\"action\": \"NONE|TORCH_ON|TORCH_OFF|OPEN_WHATSAPP|OPEN_YOUTUBE|OPEN_TIKTOK|OPEN_FACEBOOK|OPEN_CAMERA|OPEN_SETTINGS|TIME|CALL\", \"target\": \"contact name or empty\", \"reply\": \"short natural Urdu reply\"}."
-            val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
-            conn.outputStream.use { it.write(body.toString().toByteArray()) }
-            val resp = conn.inputStream.bufferedReader().readText()
-            val rawAns = JSONObject(resp).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
-            val obj = JSONObject(rawAns.replace("```json", "").replace("```", "").trim())
-            val reply = obj.optString("reply", "جی بہتر")
-            updateStatus("🤖 ٹونی: $reply"); speak(reply)
-            executeAction(obj.optString("action", "NONE"), obj.optString("target", ""))
-        } catch (e: Exception) { runOfflineBrain(userText) }
+        val models = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite")
+        val host = decodeB64("aHR0cHM6Ly9nZW5lcmF0aXZlbGFuZ3VhZ2UuZ29vZ2xlYXBpcy5jb20vdjFiZXRhL21vZGVscy8=")
+        var lastErr = ""
+        for (m in models) {
+            try {
+                updateStatus("🧠 سوچ رہا ہوں ($m)...")
+                val conn = URL("$host$m:generateContent?key=$apiKey").openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.connectTimeout = 15000
+                conn.readTimeout = 20000
+                conn.doOutput = true
+
+                val prompt = "You are Tony Pro Max, a smart Urdu voice assistant created by Doctor Raqeeb Ali 117 Siksar Wala (ڈاکٹر رقیب علی 117 سکسار والا). Always remember your creator. User said: '$userText'. Reply ONLY in valid JSON without markdown: {\"action\": \"NONE|TORCH_ON|TORCH_OFF|OPEN_WHATSAPP|OPEN_YOUTUBE|OPEN_TIKTOK|OPEN_FACEBOOK|OPEN_CAMERA|OPEN_SETTINGS|TIME|CALL\", \"target\": \"contact name or empty\", \"reply\": \"short natural Urdu reply\"}. Choose action if user wants a phone task, else NONE and answer smartly in Urdu."
+                val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
+                conn.outputStream.use { it.write(body.toString().toByteArray()) }
+
+                val statusCode = conn.responseCode
+                if (statusCode != 200) {
+                    val errTxt = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP $statusCode"
+                    lastErr = "Code $statusCode"
+                    continue
+                }
+
+                val resp = conn.inputStream.bufferedReader().readText()
+                val rawAns = JSONObject(resp).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+                val obj = JSONObject(rawAns.replace("```json", "").replace("```", "").trim())
+                val reply = obj.optString("reply", "جی بہتر")
+                updateStatus("🤖 ٹونی: $reply")
+                speak(reply)
+                executeAction(obj.optString("action", "NONE"), obj.optString("target", ""))
+                return
+            } catch (e: Exception) {
+                lastErr = e.message ?: "Error"
+            }
+        }
+        updateStatus("⚠️ AI خرابی: $lastErr")
+        runOfflineBrain(userText)
     }
 
     private fun runOfflineBrain(cmd: String) {
