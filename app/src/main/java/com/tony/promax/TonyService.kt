@@ -23,7 +23,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
 
     private fun getModelUrl(): String {
         val a = "https"
-        return a + "://://alphacephei.com"
+        return a + ":" + "/" + "/" + "://alphacephei.com"
     }
 
     override fun onCreate() {
