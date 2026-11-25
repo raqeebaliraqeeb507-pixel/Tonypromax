@@ -137,7 +137,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
     }
 
     private fun askGeminiBrain(userText: String, apiKey: String) {
-        val models = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite")
+        val models = listOf("gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite")
         val host = decodeB64("aHR0cHM6Ly9nZW5lcmF0aXZlbGFuZ3VhZ2UuZ29vZ2xlYXBpcy5jb20vdjFiZXRhL21vZGVscy8=")
         var lastErr = ""
         for (m in models) {
