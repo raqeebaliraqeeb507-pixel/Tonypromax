@@ -1,3 +1,126 @@
+package com.tony.promax
+
+import android.app.*
+import android.content.*
+import android.hardware.camera2.CameraManager
+import android.net.Uri
+import android.os.*
+import android.provider.ContactsContract
+import android.provider.MediaStore
+import android.provider.Settings
+import android.speech.tts.TextToSpeech
+import android.util.Base64
+import androidx.core.app.NotificationCompat
+import org.json.JSONArray
+import org.json.JSONObject
+import org.vosk.*
+import org.vosk.android.*
+import java.io.*
+import java.net.*
+import java.text.SimpleDateFormat
+import java.util.*
+import java.util.zip.ZipInputStream
+
+class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener {
+    companion object {
+        @Volatile
+        var liveStatus: String = "Tony Pro Max تیار ہے\nنیچے بٹن دبائیں"
+    }
+
+    private var speechService: SpeechService? = null
+    private var model: Model? = null
+    private var tts: TextToSpeech? = null
+    private var isAwake = false
+    private var isStarted = false
+
+    private fun decodeB64(s: String) = String(Base64.decode(s, 0))
+
+    override fun onCreate() {
+        super.onCreate()
+        if (Build.VERSION.SDK_INT >= 26) {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel("TonyChannel", "Tony", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        startForeground(1, buildNotif("تیار ہو رہا ہے..."))
+        tts = TextToSpeech(this, this)
+    }
+
+    override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+        if (!isStarted) { isStarted = true; initEngine() }
+        return START_STICKY
+    }
+
+    private fun buildNotif(msg: String) = NotificationCompat.Builder(this, "TonyChannel").setContentTitle("Tony Pro Max").setContentText(msg).setSmallIcon(android.R.drawable.ic_btn_speak_now).build()
+
+    private fun updateStatus(msg: String) {
+        liveStatus = msg
+        getSystemService(NotificationManager::class.java).notify(1, buildNotif(msg))
+    }
+
+    override fun onInit(s: Int) {
+        if (s == TextToSpeech.SUCCESS) {
+            val r = tts?.setLanguage(Locale("ur", "PK"))
+            if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) tts?.setLanguage(Locale("hi", "IN"))
+        }
+    }
+
+    private fun speak(t: String) { tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "T") }
+
+    private fun initEngine() {
+        Thread {
+            try {
+                val dir = File(filesDir, "vosk-model")
+                if (!File(dir, "conf/mfcc.conf").exists()) {
+                    dir.deleteRecursively()
+                    updateStatus("⏳ ماڈل ڈاؤن لوڈ ہو رہا ہے (42 MB)...")
+                    downloadModel(dir)
+                }
+                model = Model(dir.absolutePath)
+                speechService = SpeechService(Recognizer(model, 16000.0f), 16000.0f)
+                speechService?.startListening(this)
+                updateStatus("🟢 ٹونی جاگ رہا ہے!\nکہیں: 'ہیلو'، 'سنو' یا 'ٹونی'")
+                speak("ٹونی مکمل طور پر تیار ہے")
+            } catch (e: Exception) {
+                isStarted = false
+                updateStatus("❌ خرابی: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun downloadModel(dir: File) {
+        dir.mkdirs()
+        val zip = File(cacheDir, "m.zip")
+        val url = decodeB64("aHR0cHM6Ly9hbHBoYWNlcGhlaS5jb20vdm9zay9tb2RlbHMvdm9zay1tb2RlbC1zbWFsbC1oaS0wLjIyLnppcA==")
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.inputStream.use { inp -> FileOutputStream(zip).use { inp.copyTo(it) } }
+        ZipInputStream(zip.inputStream()).use { zis ->
+            var e = zis.nextEntry
+            while (e != null) {
+                val parts = e.name.split("/")
+                if (parts.size > 1) {
+                    val f = File(dir, parts.drop(1).joinToString("/"))
+                    if (e.isDirectory) f.mkdirs() else { f.parentFile?.mkdirs(); FileOutputStream(f).use { zis.copyTo(it) } }
+                }
+                e = zis.nextEntry
+            }
+        }
+        zip.delete()
+    }
+
+    override fun onPartialResult(h: String?) {
+        val p = try { JSONObject(h ?: "").optString("partial", "").trim() } catch (_: Exception) { "" }
+        if (p.isNotEmpty()) liveStatus = "👂 سن رہا ہوں: $p"
+    }
+
+    override fun onFinalResult(h: String?) { onResult(h) }
+    override fun onError(e: Exception?) {}
+    override fun onTimeout() {}
+
+    override fun onResult(h: String?) {
+        val text = try { JSONObject(h ?: "").optString("text", "").trim() } catch (_: Exception) { "" }
+        if (text.isNotEmpty()) { updateStatus("🎤 سنا گیا: $text"); processInput(text) }
+    }
     private fun runOfflineBrain(cmd: String) {
         when {
             cmd.contains("किसने बनाया") || cmd.contains("मालिक") || cmd.contains("बनाने वाला") || cmd.contains("रकीब") -> {
