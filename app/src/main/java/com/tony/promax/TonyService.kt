@@ -8,30 +8,33 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.camera2.CameraManager
 import android.os.Build
-import android.os.Bundle
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import androidx.core.app.NotificationCompat
+import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
+import org.vosk.android.RecognitionListener
+import org.vosk.android.SpeechService
+import java.io.File
+import java.io.FileOutputStream
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.ZipInputStream
 
-class TonyService : Service(), TextToSpeech.OnInitListener {
+class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener {
 
-    private var speechRecognizer: SpeechRecognizer? = null
+    private var speechService: SpeechService? = null
+    private var model: Model? = null
     private var tts: TextToSpeech? = null
     private var isAwake = false
-    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
         tts = TextToSpeech(this, this)
-        setupSpeechRecognizer()
+        initOfflineVoiceEngine()
     }
 
     override fun onInit(status: Int) {
@@ -47,59 +50,90 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "TonyUtterance")
     }
 
-    private fun setupSpeechRecognizer() {
-        mainHandler.post {
-            speechRecognizer?.destroy()
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
+    private fun updateNotification(status: String) {
+        val notification: Notification = NotificationCompat.Builder(this, "TonyChannel")
+            .setContentTitle("Tony Pro Max (Offline Engine)")
+            .setContentText(status)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .build()
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(1, notification)
+    }
 
-                override fun onError(error: Int) {
-                    restartListening()
+    private fun initOfflineVoiceEngine() {
+        Thread {
+            try {
+                val modelDir = File(filesDir, "vosk-model")
+                if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
+                    updateNotification("آف لائن ماڈل ڈاؤن لوڈ ہو رہا ہے (42 MB)...")
+                    speak("پہلی بار آف لائن وائس ماڈل ڈاؤن لوڈ کر رہا ہوں، براہ کرم انتظار کریں")
+                    downloadAndUnzipModel(modelDir)
                 }
+                updateNotification("ماڈل لوڈ ہو رہا ہے...")
+                model = Model(modelDir.absolutePath)
+                val recognizer = Recognizer(model, 16000.0f)
+                speechService = SpeechService(recognizer, 16000.0f)
+                speechService?.startListening(this)
+                updateNotification("🟢 آف لائن سن رہا ہے: کہیں 'ٹونی'")
+                speak("ٹونی مکمل طور پر تیار ہے")
+            } catch (e: Exception) {
+                updateNotification("ماڈل ایرر: انٹرنیٹ چیک کریں")
+                speak("آف لائن ماڈل ڈاؤن لوڈ نہیں ہو سکا، انٹرنیٹ چیک کریں")
+            }
+        }.start()
+    }
 
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val spokenText = matches?.firstOrNull()
-                    if (!spokenText.isNullOrEmpty()) {
-                        processVoiceCommand(spokenText.lowercase(Locale.getDefault()))
+    private fun downloadAndUnzipModel(targetDir: File) {
+        targetDir.mkdirs()
+        val zipFile = File(cacheDir, "model.zip")
+        URL("https://://alphacephei.com").openStream().use { input ->
+            FileOutputStream(zipFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+        ZipInputStream(zipFile.inputStream()).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                val nameParts = entry.name.split("/")
+                if (nameParts.size > 1 && nameParts[1].isNotEmpty()) {
+                    val relPath = nameParts.drop(1).joinToString("/")
+                    val outFile = File(targetDir, relPath)
+                    if (entry.isDirectory) {
+                        outFile.mkdirs()
+                    } else {
+                        outFile.parentFile?.mkdirs()
+                        FileOutputStream(outFile).use { fos ->
+                            zis.copyTo(fos)
+                        }
                     }
-                    restartListening()
                 }
-
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-            startListening()
+                entry = zis.nextEntry
+            }
         }
+        zipFile.delete()
     }
 
-    private fun startListening() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ur-PK")
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-        }
+    override fun onPartialResult(hypothesis: String?) {}
+
+    override fun onResult(hypothesis: String?) {
+        if (hypothesis.isNullOrEmpty()) return
         try {
-            speechRecognizer?.startListening(intent)
-        } catch (e: Exception) {
-            restartListening()
-        }
+            val text = JSONObject(hypothesis).optString("text", "").trim()
+            if (text.isNotEmpty()) {
+                processVoiceCommand(text)
+            }
+        } catch (_: Exception) {}
     }
 
-    private fun restartListening() {
-        mainHandler.postDelayed({
-            startListening()
-        }, 700)
+    override fun onFinalResult(hypothesis: String?) {
+        onResult(hypothesis)
     }
+
+    override fun onError(exception: Exception?) {}
+    override fun onTimeout() {}
 
     private fun processVoiceCommand(cmd: String) {
-        if (cmd.contains("tony") || cmd.contains("ٹونی") || cmd.contains("टोनी")) {
+        if (cmd.contains("टोनी") || cmd.contains("टॉनी") || cmd.contains("tony") || cmd.contains("सुनो")) {
             isAwake = true
             speak("جی، حکم کریں؟")
             return
@@ -108,22 +142,22 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         if (isAwake) {
             isAwake = false
             when {
-                cmd.contains("ٹارچ") || cmd.contains("فلیش") || cmd.contains("torch") -> {
-                    val turnOn = cmd.contains("آن") || cmd.contains("جلا") || cmd.contains("on")
+                cmd.contains("टॉर्च") || cmd.contains("लाइट") || cmd.contains("फ्लैश") -> {
+                    val turnOn = !cmd.contains("बंद") && !cmd.contains("ऑफ")
                     toggleFlashlight(turnOn)
                 }
-                cmd.contains("واٹس ایپ") || cmd.contains("whatsapp") -> {
+                cmd.contains("व्हाट्सएप") || cmd.contains("वाट्सएप") -> {
                     openApp("com.whatsapp", "واٹس ایپ کھول رہا ہوں")
                 }
-                cmd.contains("یوٹیوب") || cmd.contains("youtube") -> {
+                cmd.contains("यूट्यूब") -> {
                     openApp("com.google.android.youtube", "یوٹیوب کھول رہا ہوں")
                 }
-                cmd.contains("ٹائم") || cmd.contains("وقت") || cmd.contains("time") -> {
+                cmd.contains("टाइम") || cmd.contains("समय") || cmd.contains("वक्त") -> {
                     val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-                    speak("اس وقت $time ہوئے ہیں")
+                    speak("اس وقت  ہوئے ہیں")
                 }
                 else -> {
-                    speak("آپ نے کہا: $cmd")
+                    speak("آپ نے کہا: ")
                 }
             }
         }
@@ -156,8 +190,8 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createNotificationChannel()
         val notification: Notification = NotificationCompat.Builder(this, "TonyChannel")
-            .setContentTitle("Tony Pro Max (Offline Ready)")
-            .setContentText("کہیں 'ٹونی' اور پھر اپنا حکم دیں...")
+            .setContentTitle("Tony Pro Max")
+            .setContentText("شروع ہو رہا ہے...")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .build()
 
@@ -178,7 +212,9 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     }
 
     override fun onDestroy() {
-        speechRecognizer?.destroy()
+        speechService?.stop()
+        speechService?.shutdown()
+        model?.close()
         tts?.shutdown()
         super.onDestroy()
     }
