@@ -105,7 +105,10 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
         zip.delete()
     }
 
-    override fun onPartialResult(h: String?) {}
+    override fun onPartialResult(h: String?) {
+        val p = try { JSONObject(h ?: "").optString("partial", "").trim() } catch (_: Exception) { "" }
+        if (p.isNotEmpty()) liveStatus = "👂 سن رہا ہوں: $p"
+    }
     override fun onFinalResult(h: String?) { onResult(h) }
     override fun onError(e: Exception?) {}
     override fun onTimeout() {}
@@ -119,7 +122,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
     }
 
     private fun handleCmd(cmd: String) {
-        if (cmd.contains("टोनी") || cmd.contains("टॉनी") || cmd.contains("tony") || cmd.contains("सुनो")) {
+        if (cmd.contains("टोनी") || cmd.contains("टॉनी") || cmd.contains("tony") || cmd.contains("सुनो") || cmd.contains("हेलो") || cmd.contains("भाई") || cmd.contains("दोस्त")) {
             isAwake = true
             updateStatus("🟢 جی، حکم کریں؟")
             speak("جی، حکم کریں؟")
