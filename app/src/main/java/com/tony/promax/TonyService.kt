@@ -22,8 +22,8 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
     private var isAwake = false
 
     private fun getModelUrl(): String {
-        val a = String(charArrayOf('h','t','t','p','s',':','/','/'))
-        return a + "://alphacephei.com"
+        val a = "https"
+        return a + "://://alphacephei.com"
     }
 
     override fun onCreate() {
