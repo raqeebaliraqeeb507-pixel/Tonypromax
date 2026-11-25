@@ -5,6 +5,7 @@ import android.content.*
 import android.hardware.camera2.CameraManager
 import android.os.*
 import android.speech.tts.TextToSpeech
+import android.util.Base64
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
 import org.vosk.*
@@ -16,38 +17,67 @@ import java.util.*
 import java.util.zip.ZipInputStream
 
 class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener {
+    companion object {
+        @Volatile
+        var liveStatus: String = "Tony Pro Max تیار ہے\nنیچے بٹن دبائیں"
+    }
+
     private var speechService: SpeechService? = null
     private var model: Model? = null
     private var tts: TextToSpeech? = null
     private var isAwake = false
+    private var isStarted = false
 
     private fun getModelUrl(): String {
-        val a = "https"
-        return String(android.util.Base64.decode("aHR0cHM6Ly9hbHBoYWNlcGhlaS5jb20vdm9zay9tb2RlbHMvdm9zay1tb2RlbC1zbWFsbC1oaS0wLjIyLnppcA==", 0))
+        val b64 = "aHR0cHM6Ly9hbHBoYWNlcGhlaS5jb20vdm9zay9tb2RlbHMvdm9zay1tb2RlbC1zbWFsbC1oaS0wLjIyLnppcA=="
+        return String(Base64.decode(b64, 0))
     }
 
     override fun onCreate() {
         super.onCreate()
-        if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("TonyChannel", "Tony", NotificationManager.IMPORTANCE_LOW))
-        startForeground(1, NotificationCompat.Builder(this, "TonyChannel").setContentTitle("Tony Pro Max").setContentText("تیار ہو رہا ہے...").setSmallIcon(android.R.drawable.ic_btn_speak_now).build())
+        if (Build.VERSION.SDK_INT >= 26) {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel("TonyChannel", "Tony", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        startForeground(1, buildNotif("تیار ہو رہا ہے..."))
         tts = TextToSpeech(this, this)
-        initEngine()
+    }
+
+    override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+        if (!isStarted) {
+            isStarted = true
+            initEngine()
+        }
+        return START_STICKY
+    }
+
+    private fun buildNotif(msg: String): Notification {
+        return NotificationCompat.Builder(this, "TonyChannel")
+            .setContentTitle("Tony Pro Max")
+            .setContentText(msg)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .build()
+    }
+
+    private fun updateStatus(msg: String) {
+        liveStatus = msg
+        getSystemService(NotificationManager::class.java).notify(1, buildNotif(msg))
     }
 
     override fun onInit(s: Int) {
         if (s == TextToSpeech.SUCCESS) {
             val r = tts?.setLanguage(Locale("ur", "PK"))
-            if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) tts?.setLanguage(Locale("hi", "IN"))
+            if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts?.setLanguage(Locale("hi", "IN"))
+            }
         }
     }
 
-    private fun speak(t: String) { tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "T") }
-
-    private fun updateStatus(msg: String) {
-        sendBroadcast(Intent("TONY_STATUS").setPackage(packageName).putExtra("msg", msg))
-        val n = NotificationCompat.Builder(this, "TonyChannel").setContentTitle("Tony Pro Max").setContentText(msg).setSmallIcon(android.R.drawable.ic_btn_speak_now).build()
-        getSystemService(NotificationManager::class.java).notify(1, n)
+    private fun speak(t: String) {
+        tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "T")
     }
+
     private fun initEngine() {
         Thread {
             try {
@@ -62,10 +92,11 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
                 model = Model(dir.absolutePath)
                 speechService = SpeechService(Recognizer(model, 16000.0f), 16000.0f)
                 speechService?.startListening(this)
-                updateStatus("🟢 آف لائن سن رہا ہے!\nکہیں: 'ٹونی' یا 'سنو'")
+                updateStatus("🟢 آف لائن سن رہا ہے!\nکہیں: 'ہیلو'، 'سنو' یا 'ٹونی'")
                 speak("ٹونی مکمل طور پر تیار ہے")
             } catch (e: Exception) {
-                updateStatus("❌ خرابی: ${e.message}")
+                isStarted = false
+                updateStatus("❌ خرابی: ${e.message}\nدوبارہ بٹن دبائیں")
             }
         }.start()
     }
@@ -74,6 +105,8 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
         dir.mkdirs()
         val zip = File(cacheDir, "m.zip")
         val conn = URL(getModelUrl()).openConnection() as HttpURLConnection
+        conn.connectTimeout = 15000
+        conn.readTimeout = 30000
         val total = conn.contentLength
         var dl = 0
         var last = -1
@@ -86,18 +119,25 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
                     dl += n
                     if (total > 0) {
                         val p = (dl * 100) / total
-                        if (p != last && p % 5 == 0) { last = p; updateStatus("⏳ ڈاؤن لوڈ ہو رہا ہے: $p%") }
+                        if (p != last && p % 5 == 0) {
+                            last = p
+                            updateStatus("⏳ ماڈل ڈاؤن لوڈ ہو رہا ہے: $p%")
+                        }
                     }
                 }
             }
         }
+        updateStatus("📦 فائل کھولی جا رہی ہے...")
         ZipInputStream(zip.inputStream()).use { zis ->
             var e = zis.nextEntry
             while (e != null) {
                 val parts = e.name.split("/")
                 if (parts.size > 1) {
                     val f = File(dir, parts.drop(1).joinToString("/"))
-                    if (e.isDirectory) f.mkdirs() else { f.parentFile?.mkdirs(); FileOutputStream(f).use { zis.copyTo(it) } }
+                    if (e.isDirectory) f.mkdirs() else {
+                        f.parentFile?.mkdirs()
+                        FileOutputStream(f).use { zis.copyTo(it) }
+                    }
                 }
                 e = zis.nextEntry
             }
@@ -109,6 +149,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
         val p = try { JSONObject(h ?: "").optString("partial", "").trim() } catch (_: Exception) { "" }
         if (p.isNotEmpty()) liveStatus = "👂 سن رہا ہوں: $p"
     }
+
     override fun onFinalResult(h: String?) { onResult(h) }
     override fun onError(e: Exception?) {}
     override fun onTimeout() {}
@@ -143,7 +184,10 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
     private fun torch(on: Boolean) {
         try {
             val cm = getSystemService(CAMERA_SERVICE) as CameraManager
-            cm.cameraIdList.firstOrNull()?.let { cm.setTorchMode(it, on); speak(if (on) "ٹارچ آن کر دی ہے" else "ٹارچ بند کر دی ہے") }
+            cm.cameraIdList.firstOrNull()?.let {
+                cm.setTorchMode(it, on)
+                speak(if (on) "ٹارچ آن کر دی ہے" else "ٹارچ بند کر دی ہے")
+            }
         } catch (_: Exception) { speak("ٹارچ کنٹرول نہیں ہو سکی") }
     }
 
@@ -152,12 +196,10 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
         if (i != null) { startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); speak(msg) } else speak("یہ ایپ انسٹال نہیں ہے")
     }
 
-    override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
-        if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("TonyChannel", "Tony", NotificationManager.IMPORTANCE_LOW))
-        startForeground(1, NotificationCompat.Builder(this, "TonyChannel").setContentTitle("Tony Pro Max").setContentText("تیار ہو رہا ہے...").setSmallIcon(android.R.drawable.ic_btn_speak_now).build())
-        return START_STICKY
+    override fun onDestroy() {
+        speechService?.stop(); speechService?.shutdown(); model?.close(); tts?.shutdown()
+        super.onDestroy()
     }
 
-    override fun onDestroy() { speechService?.stop(); speechService?.shutdown(); model?.close(); tts?.shutdown(); super.onDestroy() }
     override fun onBind(i: Intent?): IBinder? = null
 }
