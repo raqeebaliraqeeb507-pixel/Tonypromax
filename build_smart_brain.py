@@ -130,3 +130,71 @@ part2 = '''    private fun processInput(rawCmd: String) {
 with open("app/src/main/java/com/tony/promax/TonyService.kt", "w") as f:
     f.write(part1 + "\n" + part2)
 print("✅ ALL_COMPLETE_WITH_CREATOR")
+part2 = '''    private fun processInput(rawCmd: String) {
+        var cmd = rawCmd
+        val wakes = listOf("टोनी", "टॉनी", "tony", "सुनो", "हेलो", "भाई", "दोस्त")
+        if (wakes.any { cmd.contains(it) }) {
+            isAwake = true
+            wakes.forEach { cmd = cmd.replace(it, "").trim() }
+            if (cmd.isEmpty()) {
+                updateStatus("🟢 جی، حکم کریں؟")
+                speak("جی، حکم کریں؟")
+                return
+            }
+        }
+        if (!isAwake) return
+        isAwake = false
+
+        val apiKey = getSharedPreferences("TonyPrefs", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
+        if (apiKey.isNotEmpty()) {
+            Thread { askGeminiBrain(cmd, apiKey) }.start()
+        } else {
+            runOfflineBrain(cmd)
+        }
+    }
+
+    private fun askGeminiBrain(userText: String, apiKey: String) {
+        try {
+            updateStatus("🧠 سوچ رہا ہوں...")
+            val base = decodeB64("aHR0cHM6Ly9nZW5lcmF0aXZlbGFuZ3VhZ2UuZ29vZ2xlYXBpcy5jb20vdjFiZXRhL21vZGVscy9nZW1pbmktMS41LWZsYXNoOmdlbmVyYXRlQ29udGVudD9rZXk9")
+            val conn = URL(base + apiKey).openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.doOutput = true
+
+            val prompt = "You are Tony Pro Max, a smart Urdu voice assistant created by Doctor Raqeeb Ali 117 Siksar Wala (ڈاکٹر رقیب علی 117 سکسار والا). Always remember your creator. User said: '$userText'. Reply ONLY in valid JSON without markdown: {\\"action\\": \\"NONE|TORCH_ON|TORCH_OFF|OPEN_WHATSAPP
+rm -f make_p2.py
+cat << 'EOF' >> app/src/main/java/com/tony/promax/TonyService.kt
+    private fun processInput(rawCmd: String) {
+        var cmd = rawCmd
+        val wakes = listOf("टोनी", "टॉनी", "tony", "सुनो", "हेलो", "भाई", "दोस्त")
+        if (wakes.any { cmd.contains(it) }) {
+            isAwake = true
+            wakes.forEach { cmd = cmd.replace(it, "").trim() }
+            if (cmd.isEmpty()) { updateStatus("🟢 جی، حکم کریں؟"); speak("جی، حکم کریں؟"); return }
+        }
+        if (!isAwake) return
+        isAwake = false
+        val apiKey = getSharedPreferences("TonyPrefs", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
+        if (apiKey.isNotEmpty()) Thread { askGeminiBrain(cmd, apiKey) }.start() else runOfflineBrain(cmd)
+    }
+
+    private fun askGeminiBrain(userText: String, apiKey: String) {
+        try {
+            updateStatus("🧠 سوچ رہا ہوں...")
+            val base = decodeB64("aHR0cHM6Ly9nZW5lcmF0aXZlbGFuZ3VhZ2UuZ29vZ2xlYXBpcy5jb20vdjFiZXRhL21vZGVscy9nZW1pbmktMS41LWZsYXNoOmdlbmVyYXRlQ29udGVudD9rZXk9")
+            val conn = URL(base + apiKey).openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.doOutput = true
+            val prompt = "You are Tony Pro Max, a smart Urdu voice assistant created by Doctor Raqeeb Ali 117 Siksar Wala (ڈاکٹر رقیب علی 117 سکسار والا). User said: '$userText'. Reply ONLY in valid JSON: {\"action\": \"NONE|TORCH_ON|TORCH_OFF|OPEN_WHATSAPP|OPEN_YOUTUBE|OPEN_TIKTOK|OPEN_FACEBOOK|OPEN_CAMERA|OPEN_SETTINGS|TIME|CALL\", \"target\": \"contact name or empty\", \"reply\": \"short natural Urdu reply\"}."
+            val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            val resp = conn.inputStream.bufferedReader().readText()
+            val rawAns = JSONObject(resp).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+            val obj = JSONObject(rawAns.replace("```json", "").replace("```", "").trim())
+            val reply = obj.optString("reply", "جی بہتر")
+            updateStatus("🤖 ٹونی: $reply"); speak(reply)
+            executeAction(obj.optString("action", "NONE"), obj.optString("target", ""))
+        } catch (e: Exception) { runOfflineBrain(userText) }
+    }
