@@ -205,9 +205,10 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
         for (m in models) {
             try {
                 updateStatus("🤖 ٹونی سوچ رہا ہے ($m)...")
-                val conn = URL("$host$m:generateContent?key=$apiKey").openConnection() as HttpURLConnection
+                val conn = URL("$host$m:generateContent").openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("x-goog-api-key", apiKey.trim())
                 conn.connectTimeout = 15000
                 conn.readTimeout = 20000
                 conn.doOutput = true
@@ -255,7 +256,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
                 lastErr = e.message ?: "Error"
             }
         }
-        updateStatus("⚠️ AI مسئلہ ($lastErr)")
+        updateStatus("⚠️ AI مسئلہ ($lastErr)"); speak("گوگل سرور سے رابطہ نہیں ہو سکا")
         runOfflineBrain(userText)
     }
 
