@@ -188,7 +188,8 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
         awakeUntil = now + 25000L
         updateStatus("🧠 بات سمجھ رہا ہوں...")
 
-        val apiKey = getSharedPreferences("TonyPrefs", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
+        val savedKey = getSharedPreferences("TonyPrefs", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
+        val apiKey = if (savedKey.isNotEmpty()) savedKey else decodeB64("QVEuQWI4Uk42SjVhUUg3bjZOTUFhbmRkdmdWbzBWUW8yTzFya1J0eXdmS3dqRnVQNWZsaVE=")
         if (apiKey.isNotEmpty()) {
             Thread { askGeminiBrain(cmd, apiKey) }.start()
         } else {
