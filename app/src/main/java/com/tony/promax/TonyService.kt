@@ -49,7 +49,7 @@ class TonyService : Service(), RecognitionListener, TextToSpeech.OnInitListener 
         private const val ACTIVE_WINDOW_MS = 25000L
         private val WAKE_WORDS = listOf("टोनी", "टॉनी", "tony", "सुनो", "हेलो", "भाई", "दोस्त")
         private val DEVANAGARI = Regex("[\\u0900-\\u097F]")
-        private val GEMINI_MODELS = listOf("gemini-2.5-flash", "gemini-2.5-flash-lite")
+        private val GEMINI_MODELS = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite")
         private val ALLOWED_ACTIONS = setOf(
             "NONE", "TORCH_ON", "TORCH_OFF", "OPEN_WHATSAPP", "OPEN_YOUTUBE", "OPEN_TIKTOK",
             "OPEN_FACEBOOK", "OPEN_CAMERA", "OPEN_SETTINGS", "OPEN_WIFI", "OPEN_BLUETOOTH", "TIME", "CALL"
