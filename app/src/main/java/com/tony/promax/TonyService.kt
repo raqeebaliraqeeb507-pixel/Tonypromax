@@ -250,7 +250,7 @@ class TonyService : Service(), RecognitionListener, TextToSpeech.OnInitListener 
         try {
             conn = URL(MODEL_URL).openConnection() as HttpURLConnection
             conn.connectTimeout = 20000
-            conn.readTimeout = 30000
+            conn.readTimeout = 60000
             conn.connect()
             if (conn.responseCode != 200) throw Exception("ڈاؤن لوڈ HTTP ${conn.responseCode}")
             val total = conn.contentLength.toLong()
@@ -434,8 +434,7 @@ class TonyService : Service(), RecognitionListener, TextToSpeech.OnInitListener 
         root.put("generationConfig", JSONObject()
             .put("responseMimeType", "application/json")
             .put("temperature", 0.7)
-            .put("maxOutputTokens", 512)
-            .put("thinkingConfig", JSONObject().put("thinkingBudget", 0)))
+            .put("maxOutputTokens", 2048))
         return root.toString()
     }
 
@@ -448,7 +447,7 @@ class TonyService : Service(), RecognitionListener, TextToSpeech.OnInitListener 
             conn = URL(url).openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.connectTimeout = 15000
-            conn.readTimeout = 30000
+            conn.readTimeout = 60000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             if (useHeader) conn.setRequestProperty("x-goog-api-key", key)
