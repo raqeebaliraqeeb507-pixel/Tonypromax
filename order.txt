@@ -1,1 +1,1 @@
-Fix Gemini API connection with x-goog-api-key header, remove Hindi text, keep pure Urdu replies
+Fix Gemini API connection, remove Hindi text, keep pure Urdu replies
