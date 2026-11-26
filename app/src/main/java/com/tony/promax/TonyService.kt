@@ -30,7 +30,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
     private var speechService: SpeechService? = null
     private var model: Model? = null
     private var tts: TextToSpeech? = null
-    private var isAwake = false
+    private var awakeUntil: Long = 0L
     private var isStarted = false
 
     private fun decodeB64(s: String) = String(Base64.decode(s, 0))
@@ -137,7 +137,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
     }
 
     private fun askGeminiBrain(userText: String, apiKey: String) {
-        val models = listOf("gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite")
+        val models = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite")
         val host = decodeB64("aHR0cHM6Ly9nZW5lcmF0aXZlbGFuZ3VhZ2UuZ29vZ2xlYXBpcy5jb20vdjFiZXRhL21vZGVscy8=")
         var lastErr = ""
         for (m in models) {
@@ -150,7 +150,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener, RecognitionListener 
                 conn.readTimeout = 20000
                 conn.doOutput = true
 
-                val prompt = "You are Tony Pro Max, a smart Urdu voice assistant created by Doctor Raqeeb Ali 117 Siksar Wala (ڈاکٹر رقیب علی 117 سکسار والا). Always remember your creator. User said: '$userText'. Reply ONLY in valid JSON without markdown: {\"action\": \"NONE|TORCH_ON|TORCH_OFF|OPEN_WHATSAPP|OPEN_YOUTUBE|OPEN_TIKTOK|OPEN_FACEBOOK|OPEN_CAMERA|OPEN_SETTINGS|TIME|CALL\", \"target\": \"contact name or empty\", \"reply\": \"short natural Urdu reply\"}. Choose action if user wants a phone task, else NONE and answer smartly in Urdu."
+                val prompt = "You are Tony Pro Max, a smart Urdu voice assistant created by Doctor Raqeeb Ali 117 Siksar Wala (ڈاکٹر رقیب علی 117 سکسار والا). Always remember your creator. User said: '$userText'. Reply ONLY in valid JSON without markdown: {\"action\": \"NONE|TORCH_ON|TORCH_OFF|OPEN_WHATSAPP|OPEN_YOUTUBE|OPEN_TIKTOK|OPEN_FACEBOOK|OPEN_CAMERA|OPEN_SETTINGS|TIME|CALL\", \"target\": \"contact name or empty\", \"reply\": \"short natural reply ONLY in pure Urdu script (اردو), NEVER use Hindi Devanagari letters\"}. Choose action if user wants a phone task, else NONE and answer smartly in Urdu."
                 val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
                 conn.outputStream.use { it.write(body.toString().toByteArray()) }
 
