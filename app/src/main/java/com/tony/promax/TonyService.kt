@@ -12,7 +12,14 @@ import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.media.RingtoneManager
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -64,7 +71,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
             Regex("(baat\\s*)?(suno|sunno|sunte\\s*ho)\\s*(tony|toni|tonny)")
         )
         private const val SYSTEM_PROMPT =
-            "Your name is Tony Pro Max. Stay in this identity always. If anyone asks who created or made you, answer exactly: مجھے ڈاکٹر رقیب علی نے بنایا ہے۔ If anyone asks where Dr. Raqeeb Ali lives, answer exactly: وہ ضلع بہاولنگر، تحصیل ہارون آباد، چک نمبر 117/6R میں رہتے ہیں۔ (Still begin with the [NONE] tag line as required.) " +
+            "Your name is Tony Pro Max. Stay in this identity always. Never mention Claude, Anthropic, Gemini or Google as who you are or who made you. If anyone asks who created or made you, answer exactly: مجھے ڈاکٹر رقیب علی نے بنایا ہے۔ If anyone asks where Dr. Raqeeb Ali lives, answer exactly: وہ ضلع بہاولنگر، تحصیل ہارون آباد، چک نمبر 117/6R میں رہتے ہیں۔ (Still begin with the [NONE] tag line as required.) " +
             "You are Tony, a personal AI assistant. Important facts: Dr. Raqeeb Ali (ڈاکٹر رقیب علی) " +
             "lives in 117/6-R, District Bahawalnagar, Pakistan (117 سکس آر، ضلع بہاولنگر). " +
             "Always answer concisely in 1-2 sentences in Urdu. Never guess or make up personal facts; " +
@@ -111,6 +118,10 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     private var quickFails = 0
     private var lastStartAt = 0L
     private var beepMuted = false
+    @Volatile private var online = true
+    private var inCall = false
+    private var phoneCb: Any? = null
+    private var netCb: ConnectivityManager.NetworkCallback? = null
 
     // ---------- اردو اسٹیٹس ----------
     private fun setStatus(s: String) {
@@ -118,7 +129,9 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         liveStatus = if (clean.isEmpty()) "..." else clean
     }
 
-    private fun stateText(): String {
+    private fun stateText(): String = stateBase() + (if (online) "" else " — آف لائن موڈ")
+
+    private fun stateBase(): String {
         return if (isAwake) "ٹونی جاگ رہا ہے — اپنی بات بولیں"
         else "ٹونی سٹینڈ بائی — 'بات سنو ٹونی' کہیں"
     }
@@ -137,6 +150,131 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    // ---------- فون کال ----------
+    private fun startCallMonitor() {
+        if (phoneCb != null) return
+        if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return
+        try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            if (Build.VERSION.SDK_INT >= 31) {
+                val cb = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                    override fun onCallStateChanged(state: Int) {
+                        mainHandler.post { onCallState(state) }
+                    }
+                }
+                tm.registerTelephonyCallback(mainExecutor, cb)
+                phoneCb = cb
+            } else {
+                @Suppress("DEPRECATION")
+                val l = object : PhoneStateListener() {
+                    @Deprecated("Deprecated in Java")
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        mainHandler.post { onCallState(state) }
+                    }
+                }
+                @Suppress("DEPRECATION")
+                tm.listen(l, PhoneStateListener.LISTEN_CALL_STATE)
+                phoneCb = l
+            }
+        } catch (e: Exception) { }
+    }
+
+    private fun onCallState(state: Int) {
+        if (destroyed) return
+        when (state) {
+            TelephonyManager.CALL_STATE_RINGING -> onCallRinging()
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                if (!inCall) {
+                    inCall = true
+                    cancelSleepTimer()
+                    isAwake = false
+                    processing = true
+                    turnId++
+                    stopRecognizer()
+                    setStatus("فون کال جاری ہے — مائیک بند")
+                }
+            }
+            TelephonyManager.CALL_STATE_IDLE -> {
+                if (inCall) {
+                    inCall = false
+                    processing = false
+                    muteBeep(false)
+                    setStatus(stateText())
+                    restartListening(1000)
+                }
+            }
+        }
+    }
+
+    private fun onCallRinging() {
+        if (inCall) return
+        inCall = true
+        cancelSleepTimer()
+        isAwake = false
+        turnId++
+        processing = true
+        stopRecognizer()
+        try { tts?.stop() } catch (e: Exception) { }
+        firstChunk = true
+        pending = 0
+        replyFinished = false
+        curReply = null
+        setStatus("آپ کی کال آ رہی ہے — مائیک بند")
+        try {
+            RingtoneManager.getRingtone(
+                this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            )?.play()
+        } catch (e: Exception) { }
+        mainHandler.postDelayed({
+            if (!inCall || destroyed) return@postDelayed
+            speakChunk("آپ کی کال آ رہی ہے ڈاکٹر رقیب علی جی۔")
+            replyFinished = true
+        }, 1200)
+    }
+
+    // ---------- انٹرنیٹ مانیٹر ----------
+    private fun startNetMonitor() {
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+            online = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) { setOnline(true) }
+                override fun onLost(network: Network) { setOnline(false) }
+            }
+            cm.registerDefaultNetworkCallback(cb)
+            netCb = cb
+        } catch (e: Exception) { }
+    }
+
+    private fun setOnline(v: Boolean) {
+        online = v
+        mainHandler.post {
+            if (!processing && !holdStatus && !inCall && !destroyed) setStatus(stateText())
+        }
+    }
+
+    private fun stopMonitors() {
+        try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            val pc = phoneCb
+            if (pc is PhoneStateListener) {
+                @Suppress("DEPRECATION")
+                tm.listen(pc, PhoneStateListener.LISTEN_NONE)
+            } else if (pc != null && Build.VERSION.SDK_INT >= 31) {
+                tm.unregisterTelephonyCallback(pc as TelephonyCallback)
+            }
+        } catch (e: Exception) { }
+        phoneCb = null
+        try {
+            val cb = netCb
+            if (cb != null) {
+                (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(cb)
+            }
+        } catch (e: Exception) { }
+        netCb = null
+    }
+
     // ---------- Service lifecycle ----------
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -147,10 +285,12 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
         }
         startFg()
+        startNetMonitor()
         tts = TextToSpeech(this, this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startCallMonitor()
         if (recognizer == null) {
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 setStatus("مائیکروفون کی اجازت نہیں ہے")
@@ -163,6 +303,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         destroyed = true
+        stopMonitors()
         mainHandler.removeCallbacksAndMessages(null)
         muteBeep(false)
         try { recognizer?.cancel() } catch (e: Exception) { }
@@ -266,7 +407,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     }
 
     private val startRunnable = Runnable {
-        if (destroyed || processing || listening) return@Runnable
+        if (destroyed || processing || listening || inCall) return@Runnable
         val r = recognizer ?: return@Runnable
         try {
             listening = true
@@ -301,6 +442,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun restartListening(delay: Long) {
+        if (inCall) return
         mainHandler.removeCallbacks(startRunnable)
         mainHandler.postDelayed(startRunnable, delay)
     }
@@ -451,6 +593,37 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         if (rest.length >= 3) ask(rest) else speakSimple("جی ڈاکٹر صاحب، حکم کریں")
     }
 
+    // ---------- آف لائن موڈ (مقامی جوابات) ----------
+    private fun offlineAnswer(q: String) {
+        val n = normalize(q)
+        fun has(vararg w: String) = w.any { n.contains(it) }
+        var tag = "NONE"
+        var text = "انٹرنیٹ بند ہے، میں اس وقت صرف بنیادی کام کر سکتا ہوں، جیسے وقت بتانا، ٹارچ اور ایپس کھولنا۔"
+        when {
+            has("کس نے بنایا", "بنانے والا", "تمہیں کس", "آپ کو کس", "خالق") ->
+                text = "مجھے ڈاکٹر رقیب علی نے بنایا ہے۔"
+            has("کہاں رہتے", "کہاں رہتا", "رہائش") ->
+                text = "وہ ضلع بہاولنگر، تحصیل ہارون آباد، چک نمبر 117/6R میں رہتے ہیں۔"
+            has("تمہارا نام", "آپ کا نام", "کون ہو", "کون ہیں", "نام کیا") ->
+                text = "میرا نام ٹونی پرو میکس ہے۔"
+            has("وقت", "ٹائم", "بجے") -> tag = "TIME"
+            has("ٹارچ", "فلیش", "لائٹ") ->
+                tag = if (has("بند", "آف")) "TORCH_OFF" else "TORCH_ON"
+            has("واٹس") -> tag = "OPEN_WHATSAPP"
+            has("یوٹیوب") -> tag = "OPEN_YOUTUBE"
+            has("ٹک ٹاک", "ٹکٹاک") -> tag = "OPEN_TIKTOK"
+            has("فیس بک") -> tag = "OPEN_FACEBOOK"
+            has("کیمرہ", "کیمرا") -> tag = "OPEN_CAMERA"
+            has("وائی فائی", "وائفائی") -> tag = "OPEN_WIFI"
+            has("بلوٹوتھ", "بلوٹوث") -> tag = "OPEN_BLUETOOTH"
+            has("سیٹنگ") -> tag = "OPEN_SETTINGS"
+        }
+        val r = Reply(q)
+        curReply = r
+        r.onText("[" + tag + "]\n" + (if (tag == "NONE") text else ""))
+        r.finish()
+    }
+
     // ---------- باری کا کنٹرول ----------
     private fun beginTurn(): Int {
         cancelSleepTimer()
@@ -497,6 +670,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     private fun ask(q: String) {
         val turn = beginTurn()
         setStatus("ٹونی سوچ رہا ہے...")
+        if (!online) { offlineAnswer(q); return }
         val key = getSharedPreferences("TonyPrefs", Context.MODE_PRIVATE)
             .getString("api_key", "")?.trim().orEmpty()
         if (key.isEmpty()) {
@@ -674,7 +848,12 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
             errors.size == 1 -> errors[0]
             else -> errors.first() + "\n" + errors.last()
         }
-        mainHandler.post { if (turn == turnId) failTurn("جیمنی خرابی:\n" + msg) }
+        mainHandler.post {
+            if (turn == turnId) {
+                if (netFails > 0 && netFails == errors.size) offlineAnswer(userText)
+                else failTurn("جیمنی خرابی:\n" + msg)
+            }
+        }
     }
 
     private fun streamOnce(
