@@ -11,12 +11,14 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
@@ -32,6 +34,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.Calendar
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 class TonyService : Service(), TextToSpeech.OnInitListener {
@@ -42,13 +45,19 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         private const val CHANNEL_ID = "tony_channel"
         private const val NOTIF_ID = 117
         private const val SLEEP_MS = 12000L
+        private const val MUTE_BEEP = true
         private val GEMINI_MODELS = listOf(
             "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"
         )
         private val DEVANAGARI = Regex("[\\u0900-\\u097F]")
         private val ALLOWED_ACTIONS = setOf(
             "NONE", "TORCH_ON", "TORCH_OFF", "OPEN_WHATSAPP", "OPEN_YOUTUBE", "OPEN_TIKTOK",
-            "OPEN_FACEBOOK", "OPEN_CAMERA", "OPEN_SETTINGS", "OPEN_WIFI", "OPEN_BLUETOOTH", "TIME", "CALL"
+            "OPEN_FACEBOOK", "OPEN_CAMERA", "OPEN_SETTINGS", "OPEN_WIFI", "OPEN_BLUETOOTH",
+            "TIME", "CALL", "OPEN_APP"
+        )
+        private val ALIASES = mapOf(
+            "fb" to "facebook", "yt" to "youtube", "insta" to "instagram", "whatsup" to "whatsapp",
+            "watsapp" to "whatsapp", "chrom" to "chrome", "calc" to "calculator", "tiktok" to "tiktok"
         )
         private val WAKE_REGEXES = listOf(
             Regex("(بات\\s*)?(سنو|سنتے\\s*ہو)\\s*(ٹونی|ٹوني|ٹانی|ٹونے|ٹنی|tony|toni|tonny)"),
@@ -62,8 +71,10 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
             "Output format: the very first line of every answer must be a tag in square brackets. " +
             "Use [NONE] for normal chat and questions. Use one of [TORCH_ON] [TORCH_OFF] [OPEN_WHATSAPP] " +
             "[OPEN_YOUTUBE] [OPEN_TIKTOK] [OPEN_FACEBOOK] [OPEN_CAMERA] [OPEN_SETTINGS] [OPEN_WIFI] " +
-            "[OPEN_BLUETOOTH] [TIME] for device commands. Use [CALL:Name] to phone someone, where Name " +
-            "is the contact name in English letters. After the tag, on a new line, write the Urdu reply " +
+            "[OPEN_BLUETOOTH] [TIME] for device commands. Use [OPEN_APP:Name] to open ANY other app, " +
+            "where Name is the app name in English letters (for example [OPEN_APP:Chrome]). " +
+            "Use [CALL:Name] to phone someone, where " +
+            "Name is the contact name in English letters. After the tag, on a new line, write the Urdu reply " +
             "using only Urdu/Arabic script (never Devanagari or Hindi script), plain text, no markdown, " +
             "no emojis. The user's speech comes from a speech recognizer and may contain small mistakes; " +
             "understand the intended meaning."
@@ -79,6 +90,8 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     private var greeted = false
     private val history = ArrayList<Pair<String, String>>()
     @Volatile private var goodModel: String? = null
+    private val coolUntil = ConcurrentHashMap<String, Long>()
+    private val lastErr = ConcurrentHashMap<String, String>()
 
     private var isAwake = false
     private var processing = false
@@ -93,6 +106,10 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     private var firstChunk = true
     private var uttCounter = 0
     private var curReply: Reply? = null
+    private var errStreak = 0
+    private var quickFails = 0
+    private var lastStartAt = 0L
+    private var beepMuted = false
 
     // ---------- اردو اسٹیٹس ----------
     private fun setStatus(s: String) {
@@ -103,6 +120,20 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     private fun stateText(): String {
         return if (isAwake) "ٹونی جاگ رہا ہے — اپنی بات بولیں"
         else "ٹونی سٹینڈ بائی — 'بات سنو ٹونی' کہیں"
+    }
+
+    // ---------- مائیک کی بیپ خاموش ----------
+    private fun muteBeep(mute: Boolean) {
+        if (!MUTE_BEEP || beepMuted == mute) return
+        beepMuted = mute
+        val d = if (mute) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val streams = intArrayOf(
+            AudioManager.STREAM_MUSIC, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM
+        )
+        for (s in streams) {
+            try { am.adjustStreamVolume(s, d, 0) } catch (e: Exception) { }
+        }
     }
 
     // ---------- Service lifecycle ----------
@@ -132,6 +163,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         destroyed = true
         mainHandler.removeCallbacksAndMessages(null)
+        muteBeep(false)
         try { recognizer?.cancel() } catch (e: Exception) { }
         try { recognizer?.destroy() } catch (e: Exception) { }
         recognizer = null
@@ -226,8 +258,9 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3000L)
         }
     }
 
@@ -236,11 +269,15 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         val r = recognizer ?: return@Runnable
         try {
             listening = true
+            lastStartAt = SystemClock.elapsedRealtime()
+            muteBeep(true)
             r.startListening(recIntent)
         } catch (e: Exception) {
             listening = false
+            muteBeep(false)
+            errStreak++
             recreateRecognizer()
-            restartListening(1000)
+            restartListening(minOf(8000L, 1000L * errStreak))
         }
     }
 
@@ -270,6 +307,7 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
     private fun stopRecognizer() {
         listening = false
         mainHandler.removeCallbacks(startRunnable)
+        muteBeep(false)
         try { recognizer?.cancel() } catch (e: Exception) { }
     }
 
@@ -278,6 +316,8 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
             if (!processing && !holdStatus) setStatus(stateText())
         }
         override fun onBeginningOfSpeech() {
+            errStreak = 0
+            quickFails = 0
             if (isAwake && !processing) cancelSleepTimer()
         }
         override fun onRmsChanged(rmsdB: Float) { }
@@ -294,11 +334,13 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         }
         override fun onResults(results: Bundle?) {
             listening = false
+            errStreak = 0
+            quickFails = 0
             if (processing) return
             val list: List<String> =
                 results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: emptyList()
             handleSpeech(list)
-            if (!processing) restartListening(100)
+            if (!processing) restartListening(300)
         }
         override fun onError(error: Int) {
             listening = false
@@ -306,18 +348,24 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                     if (error == SpeechRecognizer.ERROR_NO_MATCH && isAwake) armSleepTimer()
-                    restartListening(100)
+                    val ran = SystemClock.elapsedRealtime() - lastStartAt
+                    if (ran < 2500L) quickFails++ else quickFails = 0
+                    val wait = if (quickFails == 0) 300L else minOf(5000L, 700L * quickFails)
+                    restartListening(wait)
                 }
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
                     recreateRecognizer()
-                    restartListening(800)
+                    errStreak++
+                    restartListening(minOf(8000L, 1000L * errStreak))
                 }
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                    muteBeep(false)
                     setStatus("مائیکروفون کی اجازت نہیں ہے")
                 }
                 else -> {
+                    errStreak++
                     setStatus("سننے میں خرابی (کوڈ ${error}) — دوبارہ کوشش ہو رہی ہے")
-                    restartListening(1500)
+                    restartListening(minOf(10000L, 1500L * errStreak))
                 }
             }
         }
@@ -577,6 +625,10 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         order.addAll(GEMINI_MODELS)
         var netFails = 0
         outer@ for (m in order) {
+            if (System.currentTimeMillis() < (coolUntil[m] ?: 0L)) {
+                errors.add("${m} — " + (lastErr[m] ?: "وقفہ"))
+                continue
+            }
             var useHeader = true
             var withThinking = true
             var attempts = 0
@@ -602,6 +654,14 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
                     continue
                 }
                 val label = if (err.code > 0) "HTTP ${err.code}: " else ""
+                val cool = when (err.code) {
+                    404 -> 3600000L
+                    429 -> 60000L
+                    500, 503 -> 20000L
+                    else -> 0L
+                }
+                if (cool > 0) coolUntil[m] = System.currentTimeMillis() + cool
+                lastErr[m] = label + err.text
                 errors.add("${m} — ${label}${err.text}")
                 if (err.code == 0) netFails++
                 if (netFails >= 2) break@outer
@@ -710,19 +770,20 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         return root.toString()
     }
 
-    // ---------- ایکشنز (nullکا مطلب کامیاب) ----------
+    // ---------- ایکشنز (null کا مطلب کامیاب) ----------
     private fun performAction(action: String, target: String): String? {
         return when (action) {
             "TORCH_ON" -> if (setTorch(true)) null else "ٹارچ آن نہیں ہو سکی"
             "TORCH_OFF" -> if (setTorch(false)) null else "ٹارچ بند نہیں ہو سکی"
-            "OPEN_WHATSAPP" -> openApp(listOf("com.whatsapp", "com.whatsapp.w4b"), "https://wa.me/", "واٹس ایپ نہیں کھل سکا")
-            "OPEN_YOUTUBE" -> openApp(listOf("com.google.android.youtube"), "https://www.youtube.com", "یوٹیوب نہیں کھل سکا")
-            "OPEN_TIKTOK" -> openApp(listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"), "https://www.tiktok.com", "ٹک ٹاک نہیں کھل سکا")
-            "OPEN_FACEBOOK" -> openApp(listOf("com.facebook.katana"), "https://www.facebook.com", "فیس بک نہیں کھل سکا")
+            "OPEN_WHATSAPP" -> openApp(listOf("com.whatsapp", "com.whatsapp.w4b"), "whatsapp", "https://wa.me/", "واٹس ایپ نہیں کھل سکا")
+            "OPEN_YOUTUBE" -> openApp(listOf("com.google.android.youtube"), "youtube", "https://www.youtube.com", "یوٹیوب نہیں کھل سکا")
+            "OPEN_TIKTOK" -> openApp(listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"), "tiktok", "https://www.tiktok.com", "ٹک ٹاک نہیں کھل سکا")
+            "OPEN_FACEBOOK" -> openApp(listOf("com.facebook.katana"), "facebook", "https://www.facebook.com", "فیس بک نہیں کھل سکا")
             "OPEN_CAMERA" -> launch(Intent(MediaStore.ACTION_IMAGE_CAPTURE), "کیمرہ نہیں کھل سکا")
             "OPEN_SETTINGS" -> launch(Intent(Settings.ACTION_SETTINGS), "سیٹنگز نہیں کھل سکیں")
             "OPEN_WIFI" -> launch(Intent(Settings.ACTION_WIFI_SETTINGS), "وائی فائی سیٹنگز نہیں کھل سکیں")
             "OPEN_BLUETOOTH" -> launch(Intent(Settings.ACTION_BLUETOOTH_SETTINGS), "بلوٹوتھ سیٹنگز نہیں کھل سکیں")
+            "OPEN_APP" -> openByName(target)
             "TIME" -> timeReply()
             "CALL" -> makeCall(target)
             else -> null
@@ -733,15 +794,80 @@ class TonyService : Service(), TextToSpeech.OnInitListener {
         return try {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
-            null
+            if (Build.VERSION.SDK_INT >= 29 && !Settings.canDrawOverlays(this))
+                "کوشش کی ہے۔ اگر ایپ نہ کھلے تو ٹونی کو دوسری ایپس کے اوپر دکھانے کی اجازت دیں"
+            else null
         } catch (e: Exception) {
             failReply
         }
     }
 
-    private fun openApp(pkgs: List<String>, fallbackUrl: String, failReply: String): String? {
+    // ---------- انسٹال شدہ ایپس میں نام سے تلاش ----------
+    private fun key(s: String): String = s.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
+
+    private fun lev(a: String, b: String): Int {
+        val dp = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            var prev = dp[0]
+            dp[0] = i
+            for (j in 1..b.length) {
+                val tmp = dp[j]
+                dp[j] = minOf(dp[j] + 1, dp[j - 1] + 1, prev + (if (a[i - 1] == b[j - 1]) 0 else 1))
+                prev = tmp
+            }
+        }
+        return dp[b.length]
+    }
+
+    private fun installedApps(): List<Triple<String, String, String>> {
+        val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val list = packageManager.queryIntentActivities(i, 0)
+        return list.map {
+            val label = it.loadLabel(packageManager).toString()
+            Triple(key(label), label, it.activityInfo.packageName)
+        }
+    }
+
+    // واپسی: (ایپ کا نام، پیکج)
+    private fun findApp(name: String): Pair<String, String>? {
+        var q = key(name)
+        if (q.isEmpty()) return null
+        q = ALIASES[q] ?: q
+        val apps = installedApps()
+        apps.firstOrNull { it.first == q }?.let { return Pair(it.second, it.third) }
+        apps.firstOrNull { it.first.startsWith(q) }?.let { return Pair(it.second, it.third) }
+        apps.firstOrNull { it.first.contains(q) }?.let { return Pair(it.second, it.third) }
+        apps.firstOrNull { it.first.length >= 3 && q.contains(it.first) }?.let { return Pair(it.second, it.third) }
+        apps.firstOrNull { it.third.lowercase(Locale.ROOT).contains(q) }?.let { return Pair(it.second, it.third) }
+        val limit = maxOf(1, q.length / 4)
+        var best: Triple<String, String, String>? = null
+        var bestD = Int.MAX_VALUE
+        for (a in apps) {
+            val d = lev(a.first, q)
+            if (d <= limit && d < bestD) {
+                best = a
+                bestD = d
+            }
+        }
+        return best?.let { Pair(it.second, it.third) }
+    }
+
+    private fun openByName(name: String): String? {
+        if (name.isBlank()) return "کون سی ایپ کھولنی ہے؟ نام بتائیں"
+        val found = findApp(name) ?: return "${name} نام کی ایپ فون میں نہیں ملی"
+        val i = packageManager.getLaunchIntentForPackage(found.second)
+            ?: return "${found.first} کھل نہیں سکی"
+        return launch(i, "${found.first} کھل نہیں سکی")
+    }
+
+    private fun openApp(pkgs: List<String>, name: String, fallbackUrl: String, failReply: String): String? {
         for (p in pkgs) {
             val i = packageManager.getLaunchIntentForPackage(p)
+            if (i != null) return launch(i, failReply)
+        }
+        val found = findApp(name)
+        if (found != null) {
+            val i = packageManager.getLaunchIntentForPackage(found.second)
             if (i != null) return launch(i, failReply)
         }
         return launch(Intent(Intent.ACTION_VIEW, Uri.parse(fallbackUrl)), failReply)
